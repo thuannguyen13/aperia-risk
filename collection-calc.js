@@ -1,10 +1,9 @@
-<script>
 // ─────────────────────────────────────────────────────────────
 // FILE:      collection-calc.js
 // PURPOSE:   Generic DOM formula engine — evaluates inline expressions
 //            on output cells using named variables scoped to boundary elements.
-// DEPENDS:   none
-// PLACEMENT: Page-level script — before </body>, after all Webflow collection list markup
+// DEPENDS:   Finsweet CMS List v2 (fs-attributes) for pagination re-render support
+// PLACEMENT: Page-level script — before </body>, AFTER the Finsweet fs-attributes script
 // ─────────────────────────────────────────────────────────────
 //
 // ── Attribute contract ──────────────────────────────────────
@@ -19,10 +18,10 @@
 //                                              as "name" into parent scope
 //
 //  Webflow component cell states (value-based, not presence-based):
-//    data-calc-output=""  data-calc-var="MC"      → pure var   — register only
-//    data-calc-output="MC + VW"  data-calc-var=""  → pure output — evaluate only
-//    data-calc-output="MC + VW"  data-calc-var="combined" → chained — evaluate + register
-//    data-calc-output=""  data-calc-var=""          → ignored   — empty cell
+//    data-calc-output=""   data-calc-var="MC"       → pure var    — register only
+//    data-calc-output="MC + VW"  data-calc-var=""   → pure output — evaluate only
+//    data-calc-output="MC + VW"  data-calc-var="x"  → chained     — evaluate + register
+//    data-calc-output=""   data-calc-var=""          → ignored     — empty placeholder
 //
 //  Per-output overrides:
 //    data-calc-format="currency|number|integer"
@@ -31,16 +30,16 @@
 // ── Scenario 1 — Sibling cells, multiple outputs ─────────────
 //
 //  <div data-calc-scope>
-//    <div data-calc-var="MC" data-calc-output="">768</div>
-//    <div data-calc-var="VW" data-calc-output="">770</div>
-//    <div data-calc-output="MC + VW"   data-calc-var="combined"></div>
+//    <div data-calc-var="MC"  data-calc-output="">768</div>
+//    <div data-calc-var="VW"  data-calc-output="">770</div>
+//    <div data-calc-output="MC + VW"      data-calc-var="combined"></div>
 //    <div data-calc-output="combined / 2" data-calc-var=""></div>
 //  </div>
 //
 // ── Scenario 2 — Nested collection, bubble up ────────────────
 //
 //  <div data-calc-scope>
-//    <div data-calc-scope data-calc-as="total_b">     ← Collection B list (hidden in CSS)
+//    <div data-calc-scope data-calc-as="total_b">     ← hidden Collection B list
 //      <div data-calc-var="amount" data-calc-output="">100</div>
 //      <div data-calc-var="amount" data-calc-output="">250</div>
 //      <div data-calc-output="amount" data-calc-var=""></div>
@@ -59,6 +58,11 @@
 //    <div data-calc-output="row_total" data-calc-var=""></div>  ← grand total
 //  </div>
 //
+// ── Script order in Webflow ──────────────────────────────────
+//
+//  1. Finsweet fs-attributes <script> tag
+//  2. collection-calc.js
+//
 // ── Global config override (set before this script runs) ─────
 //
 //  window.CollectionCalcConfig = {
@@ -71,8 +75,7 @@
 //
 //  Hidden nested source lists must stay in DOM:
 //    [data-calc-hidden] { display: none; }
-//
-// ============================================================
+
 
 const CollectionCalc = {
 
@@ -98,16 +101,51 @@ const CollectionCalc = {
 
   // ─── INIT ───────────────────────────────────────────────────
   init() {
-    if (window.CollectionCalcConfig) {
-      Object.assign(this.CONFIG, window.CollectionCalcConfig);
-    }
+  if (window.CollectionCalcConfig) {
+    Object.assign(this.CONFIG, window.CollectionCalcConfig);
+  }
 
+  // Run immediately for items already in the DOM
+  this._processAll();
+
+  // Watch every collection list for injected items — fires on pagination,
+  // load more, and filter changes regardless of Finsweet version
+  const collectionLists = document.querySelectorAll('[fs-list-element="list"]');
+
+  if (!collectionLists.length) {
+    console.warn('[CollectionCalc] No [fs-list-element="list"] containers found — pagination re-calc disabled.');
+    return;
+  }
+
+  collectionLists.forEach((listElement) => {
+    const observer = new MutationObserver(() => {
+      this._processAll();
+    });
+
+    observer.observe(listElement, {
+      childList: true,  // fires when Finsweet adds or removes row elements
+    });
+  });
+},
+
+  // ─── PROCESS ALL ────────────────────────────────────────────
+
+  /**
+   * Finds all scopes on the page and processes them innermost-first.
+   * Safe to call multiple times — resets counters on each run.
+   * Called on Finsweet's first render and on every renderitems event.
+   */
+  _processAll() {
     const allScopeElements = document.querySelectorAll(this.SEL.scope);
 
     if (!allScopeElements.length) {
       console.warn('[CollectionCalc] No [data-calc-scope] elements found on page.');
       return;
     }
+
+    // Reset counters so logs are accurate per render cycle
+    this.STATE.scopesProcessed   = 0;
+    this.STATE.errorsEncountered = 0;
 
     // Innermost scopes first — ensures nested results exist before parents read them
     const scopesSortedInnermostFirst = this._sortByDOMDepthDescending(allScopeElements);
@@ -116,16 +154,20 @@ const CollectionCalc = {
     console.log(`[CollectionCalc] Done — ${this.STATE.scopesProcessed} scopes processed, ${this.STATE.errorsEncountered} errors.`);
   },
 
-  // ─── PROCESS ────────────────────────────────────────────────
+  // ─── PROCESS SCOPE ──────────────────────────────────────────
 
   /**
    * Resolves one [data-calc-scope] element.
-   * 1. Collects static [data-calc-var] cells into a variable map.
-   * 2. Walks [data-calc-output] cells in DOM order — evaluate → write → optionally chain.
-   * 3. If scope has data-calc-as, injects first output result into parent scope's map.
+   * 1. Cleans up any injected vars from previous render cycle.
+   * 2. Collects static [data-calc-var] cells into a variable map.
+   * 3. Walks [data-calc-output] cells in DOM order — evaluate → write → optionally chain.
+   * 4. If scope has data-calc-as, injects first output result into parent scope's map.
    * @param {HTMLElement} scopeElement
    */
   _processScope(scopeElement) {
+    // Clean up injected vars from any previous render cycle before re-processing
+    delete scopeElement._calcInjectedVars;
+
     const variableMap    = this._collectStaticVars(scopeElement);
     const outputElements = this._getDirectChildren(scopeElement, this.SEL.output);
 
@@ -179,7 +221,7 @@ const CollectionCalc = {
 
       if (firstOutputValue === null) firstOutputValue = result;
 
-      // If this output also has a non-empty data-calc-var, register it for outputs below
+      // Non-empty data-calc-var on an output = chained — register for outputs below
       const chainedVarName = outputElement.dataset.calcVar?.trim();
       if (chainedVarName) {
         variableMap[chainedVarName] = (variableMap[chainedVarName] ?? 0) + result;
@@ -224,10 +266,10 @@ const CollectionCalc = {
       const variableName  = varElement.dataset.calcVar?.trim();
       const hasExpression = varElement.dataset.calcOutput?.trim() !== '';
 
-      // No var name — nothing to register
+      // No var name — nothing to register (text/status cells with empty data-calc-var)
       if (!variableName) return;
 
-      // Has a real expression — this is a chained output, registered during the output walk
+      // Has a real expression — chained output, registered during the output walk instead
       if (hasExpression) return;
 
       const parsedValue = this._parseNumber(varElement.textContent);
@@ -241,6 +283,7 @@ const CollectionCalc = {
    * Injects a computed inner scope result into the parent scope's variable map.
    * Stored on the parent DOM element so it's available when the parent evaluates.
    * Same variable name from multiple inner scopes = values are summed (grand total pattern).
+   * Called after inner scope finishes — before parent scope evaluates.
    * @param {HTMLElement} innerScopeElement
    * @param {string} variableName
    * @param {number} value
@@ -480,33 +523,28 @@ const CollectionCalc = {
   // ─── FORMATTING ─────────────────────────────────────────────
 
   /**
-   * Scans [data-calc-var] cells in the scope and returns the first currency
-   * symbol found. Returns null if all values appear to be plain numbers.
+   * Scans only named [data-calc-var] cells in the scope for a currency symbol.
+   * Skips empty-var cells (text/status fields) to avoid false symbol detection.
+   * Returns null if all values are plain numbers.
    * @param {HTMLElement} scopeElement
    * @returns {string|null}
    */
   _detectCurrencySymbol(scopeElement) {
-  const varElements = scopeElement.querySelectorAll(this.SEL.varCell);
+    const varElements = scopeElement.querySelectorAll(this.SEL.varCell);
 
-  for (const varElement of varElements) {
-    // Skip empty-var cells — they are CMS text fields, not numeric values
-    const variableName = varElement.dataset.calcVar?.trim();
-    if (!variableName) continue;
+    for (const varElement of varElements) {
+      // Skip empty-var cells — they are CMS text fields, not numeric values
+      const variableName = varElement.dataset.calcVar?.trim();
+      if (!variableName) continue;
 
-    const rawText     = varElement.textContent.trim();
-    const symbolMatch = rawText.match(/^([^0-9\s.,]+)|([^0-9\s.,]+)$/);
-    if (symbolMatch) return symbolMatch[0];
-  }
+      const rawText     = varElement.textContent.trim();
+      const symbolMatch = rawText.match(/^([^0-9\s.,]+)|([^0-9\s.,]+)$/);
+      if (symbolMatch) return symbolMatch[0];
+    }
 
-  return null;
-},
+    return null;
+  },
 
-  /**
-   * Strips all non-numeric characters except the decimal point and parses to float.
-   * Returns 0 on empty or unparseable input rather than NaN.
-   * @param {string} rawText
-   * @returns {number}
-   */
   _parseNumber(rawText) {
     if (!rawText || !rawText.trim()) return 0;
 
@@ -521,13 +559,6 @@ const CollectionCalc = {
     return parsed;
   },
 
-  /**
-   * Formats a computed number for display.
-   * @param {number} value
-   * @param {'currency'|'number'|'integer'} format
-   * @param {string|null} currencySymbol
-   * @returns {string}
-   */
   _formatOutput(value, format, currencySymbol) {
     if (format === 'integer') {
       return Math.round(value).toLocaleString(this.CONFIG.locale);
@@ -547,4 +578,3 @@ const CollectionCalc = {
 };
 
 CollectionCalc.init();
-</script>
