@@ -39,13 +39,11 @@ const CardCharts = {
     barStackedLabelColor:   'rgba(255,255,255,0.4)',
     barStackedFontSize:     11,
 
-    sankeyNodeWidth:      10,
-    sankeyFontSize:       12,
-    sankeyLabelColor:     'rgba(255,255,255,0.7)',
-    sankeyNodeColor:      '#4a9eff',
-    sankeyLinkOpacity:    0.45,
-    sankeyPollIntervalMs:  100, // Polling interval (ms) while waiting for d3-sankey to load
-    sankeyPollMaxAttempts: 20,  // Max poll attempts before giving up (100ms × 20 = 2s timeout)
+    sankeyNodeWidth:   10,
+    sankeyFontSize:    12,
+    sankeyLabelColor:  'rgba(255,255,255,0.7)',
+    sankeyNodeColor:   '#4a9eff',
+    sankeyLinkOpacity: 0.45,
 
     riskTrendDays:           30,
     riskTrendRandomStep:     120,
@@ -77,8 +75,8 @@ const CardCharts = {
         direction: 'vertical',
         stops: [
           { position: 0,   color: 'rgba(10, 80, 30, 0.9)' },
-          { position: 0.5, color: 'rgba(107, 251, 167, 1)' },
-          { position: 1,   color: 'rgba(107, 251, 167, 1)' },
+          { position: 0.5, color: 'rgba(30, 160, 70, 1)'  },
+          { position: 1,   color: 'rgba(80, 230, 120, 1)' },
         ],
       },
       'green-orange': {
@@ -314,7 +312,15 @@ const CardCharts = {
           spacing:         config.spacing || 0,
         }],
       },
-      options: { ...this._baseOptions(), cutout: this.CONFIG.donutCutout },
+      options: {
+        ...this._baseOptions(),
+        cutout: this.CONFIG.donutCutout,
+        plugins: {
+          legend:     { display: false },
+          datalabels: { display: false },
+          tooltip:    { mode: 'nearest', intersect: true },
+        },
+      },
     });
 
     this._postBuild(canvas, total, config.datasets.map((dataset) => ({
@@ -365,7 +371,15 @@ const CardCharts = {
           },
         ],
       },
-      options: { ...this._baseOptions(), cutout: this.CONFIG.donutTrackCutout },
+      options: {
+        ...this._baseOptions(),
+        cutout: this.CONFIG.donutTrackCutout,
+        plugins: {
+          legend:     { display: false },
+          datalabels: { display: false },
+          tooltip:    { mode: 'nearest', intersect: true },
+        },
+      },
     });
 
     this._postBuild(canvas, track.value, [
@@ -410,6 +424,7 @@ const CardCharts = {
         circumference: 180,
         cutout:        C.gaugeCutout,
         animation:     { duration: C.gaugeAnimationMs, easing: 'easeOutQuart' },
+        plugins: { ...this._baseOptions().plugins, tooltip: { enabled: false } },
       },
     });
   },
@@ -462,7 +477,7 @@ const CardCharts = {
         datasets: { bar: { barPercentage: C.barStackedPercentage } },
         plugins: {
           legend:     { display: false },
-          tooltip:    { enabled: false },
+          tooltip:    { mode: 'index', axis: isHorizontal ? 'y' : 'x', intersect: false },
           datalabels: showLabels ? {
             color:     (context) => context.dataset.labelColor || '#ffffff',
             font:      { size: 12, weight: '600' },
@@ -492,7 +507,7 @@ const CardCharts = {
 
     const chartDatasets = config.datasets.map((dataset) => {
       const score   = dataset.score ?? max;
-      const history = this._generateMockData(score, min, max, undefined, undefined, undefined, dataset.seed);
+      const history = this._generateMockData(score, min, max);
       const radii   = history.map((_, i) =>
         i === days - 1 ? C.riskTrendLastPointRadius : C.riskTrendPointRadius
       );
@@ -572,19 +587,16 @@ const CardCharts = {
   _buildSankey(el, config) {
     if (typeof d3 === 'undefined' || !d3.sankey) {
       let pollAttempts = 0;
-      const { sankeyPollIntervalMs: interval, sankeyPollMaxAttempts: maxAttempts } = this.CONFIG;
       const pollInterval = setInterval(() => {
         pollAttempts++;
         if (typeof d3 !== 'undefined' && d3.sankey) {
           clearInterval(pollInterval);
-          // Track the instance that resolves asynchronously
-          const instance = this._buildSankey(el, config);
-          if (instance) this.STATE.instances.push(instance);
-        } else if (pollAttempts > maxAttempts) {
+          this._buildSankey(el, config);
+        } else if (pollAttempts > 20) {
           clearInterval(pollInterval);
-          console.error(`[CardCharts] d3-sankey not loaded after ${interval * maxAttempts}ms.`);
+          console.error('[CardCharts] d3-sankey not loaded after 2s.');
         }
-      }, interval);
+      }, 100);
       return null;
     }
 
@@ -599,9 +611,11 @@ const CardCharts = {
     const labelColor    = config.labelColor    || C.sankeyLabelColor;
     const subLabelColor = config.subLabelColor || 'rgba(150,150,150,0.8)';
     const nodeWidth     = config.nodeWidth     || C.sankeyNodeWidth;
-    const nodePadding   = config.nodePadding   || 20;
+    const nodePadding   = config.nodePadding   ?? 20;
+    const nodeRadius    = config.nodeRadius    ?? 3;
     const linkOpacity   = config.linkOpacity   ?? C.sankeyLinkOpacity;
-    const labelPadding  = 8;
+    const labelPadding  = config.labelPadding  ?? 8;
+    const labelAlign    = config.labelAlign    || 'auto';
     const fontSize      = config.fontSize      || C.sankeyFontSize;
     const resolveColor  = (name) => nodeColors[name] || sourceColor;
 
@@ -710,10 +724,28 @@ const CardCharts = {
       svgEl.appendChild(linkGroupEl);
 
       // ── Nodes + labels ───────────────────────────────────────
-      const isLeft = (node) => node.x0 < width / 2;
-      const labelX = (node) => isLeft(node) ? node.x0 - labelPadding : node.x1 + labelPadding;
-      const anchor = (node) => isLeft(node) ? 'end' : 'start';
-      const midY   = (node) => (node.y0 + node.y1) / 2;
+      const midY = (node) => (node.y0 + node.y1) / 2;
+
+      // labelAlign: 'auto' detects side by x position.
+      // 'start' / 'center' / 'end' forces all labels to that alignment.
+      const isAutoLeft = (node) => node.x0 < width / 2;
+      const resolveLabelX = (node) => {
+        if (labelAlign === 'center') return (node.x0 + node.x1) / 2;
+        if (labelAlign === 'start')  return node.x1 + labelPadding;
+        if (labelAlign === 'end')    return node.x0 - labelPadding;
+        return isAutoLeft(node) ? node.x0 - labelPadding : node.x1 + labelPadding;
+      };
+      const resolveAnchor = (node) => {
+        if (labelAlign === 'center') return 'middle';
+        if (labelAlign === 'start')  return 'start';
+        if (labelAlign === 'end')    return 'end';
+        return isAutoLeft(node) ? 'end' : 'start';
+      };
+      const resolveIsLeft = (node) => {
+        if (labelAlign === 'start')  return false;
+        if (labelAlign === 'end')    return true;
+        return isAutoLeft(node);
+      };
 
       const nodeGroupEl = document.createElementNS(svgNS, 'g');
       graph.nodes.forEach((node) => {
@@ -723,13 +755,13 @@ const CardCharts = {
         rectEl.setAttribute('width',  node.x1 - node.x0);
         rectEl.setAttribute('height', Math.max(1, node.y1 - node.y0));
         rectEl.setAttribute('fill',   node.color);
-        rectEl.setAttribute('rx',     3);
+        rectEl.setAttribute('rx',     nodeRadius);
         nodeGroupEl.appendChild(rectEl);
 
         const nameEl = document.createElementNS(svgNS, 'text');
-        nameEl.setAttribute('x',           labelX(node));
+        nameEl.setAttribute('x',           resolveLabelX(node));
         nameEl.setAttribute('y',           midY(node) - fontSize * 0.6);
-        nameEl.setAttribute('text-anchor', anchor(node));
+        nameEl.setAttribute('text-anchor', resolveAnchor(node));
         nameEl.setAttribute('fill',        labelColor);
         nameEl.setAttribute('font-size',   fontSize);
         nameEl.setAttribute('font-weight', '500');
@@ -737,12 +769,12 @@ const CardCharts = {
         nodeGroupEl.appendChild(nameEl);
 
         const subEl = document.createElementNS(svgNS, 'text');
-        subEl.setAttribute('x',           labelX(node));
+        subEl.setAttribute('x',           resolveLabelX(node));
         subEl.setAttribute('y',           midY(node) + fontSize * 0.8);
-        subEl.setAttribute('text-anchor', anchor(node));
+        subEl.setAttribute('text-anchor', resolveAnchor(node));
         subEl.setAttribute('fill',        subLabelColor);
         subEl.setAttribute('font-size',   fontSize - 1);
-        subEl.textContent = isLeft(node)
+        subEl.textContent = resolveIsLeft(node)
           ? `${node.value} ${node.value === 1 ? 'time' : 'times'}`
           : String(node.value);
         nodeGroupEl.appendChild(subEl);
@@ -772,7 +804,7 @@ const CardCharts = {
       animation:           false,
       plugins: {
         legend:     { display: false },
-        tooltip:    { enabled: false },
+        tooltip:    { mode: 'index', intersect: false },
         datalabels: { display: false },
       },
     };
@@ -869,7 +901,7 @@ const CardCharts = {
     try {
       return JSON.parse(canvas.dataset.config);
     } catch (err) {
-      console.warn(`[CardCharts] Invalid data-config JSON on <${canvas.tagName.toLowerCase()} data-chart="${canvas.dataset.chart}">:`, err.message, canvas);
+      console.warn('[CardCharts] Invalid data-config JSON:', err);
       return {};
     }
   },
@@ -884,45 +916,26 @@ const CardCharts = {
   _resolveValues(dataset, count) {
     if (dataset.values?.length) return dataset.values;
     if (dataset.mock) {
-      const end  = dataset.score      ?? 50;
-      const min  = dataset.min        ?? 0;
-      const max  = dataset.max        ?? 100;
-      const n    = dataset.count      ?? count ?? this.CONFIG.riskTrendDays;
-      const step = dataset.stepSize   ?? this.CONFIG.riskTrendRandomStep;
+      const end  = dataset.score    ?? 50;
+      const min  = dataset.min      ?? 0;
+      const max  = dataset.max      ?? 100;
+      const n    = dataset.count    ?? count ?? this.CONFIG.riskTrendDays;
+      const step = dataset.stepSize ?? this.CONFIG.riskTrendRandomStep;
       const pull = dataset.anchorPull ?? this.CONFIG.riskTrendAnchorPull;
-      const seed = dataset.seed;       // Optional numeric seed for deterministic output
-      return this._generateMockData(end, min, max, n, step, pull, seed);
+      return this._generateMockData(end, min, max, n, step, pull);
     }
     return [];
   },
 
-  /**
-   * Returns a deterministic pseudo-random function when a seed is provided,
-   * falling back to Math.random for unseeded (non-deterministic) usage.
-   * Uses a 32-bit LCG (Numerical Recipes coefficients).
-   */
-  _seededRandom(seed) {
-    let s = seed >>> 0;
-    return function () {
-      s = (Math.imul(1664525, s) + 1013904223) >>> 0;
-      return s / 0x100000000;
-    };
-  },
-
-  /**
-   * Generates mock time-series data ending at endValue, clamped to [min, max].
-   * Pass a numeric `seed` for deterministic output (useful for tests / SSR consistency).
-   */
-  _generateMockData(endValue, min, max, count, stepSize, anchorPull, seed) {
-    const steps  = count     ?? this.CONFIG.riskTrendDays;
-    const step   = stepSize  ?? this.CONFIG.riskTrendRandomStep;
+  _generateMockData(endValue, min, max, count, stepSize, anchorPull) {
+    const steps  = count    ?? this.CONFIG.riskTrendDays;
+    const step   = stepSize ?? this.CONFIG.riskTrendRandomStep;
     const pull   = anchorPull ?? this.CONFIG.riskTrendAnchorPull;
-    const rand   = seed != null ? this._seededRandom(seed) : Math.random.bind(Math);
     const data   = new Array(steps).fill(endValue);
     let   cursor = endValue;
 
     for (let i = steps - 2; i >= 0; i--) {
-      const next = cursor + (rand() - 0.5) * 2 * step + (endValue - cursor) * pull;
+      const next = cursor + (Math.random() - 0.5) * 2 * step + (endValue - cursor) * pull;
       cursor     = Number.isFinite(next) ? Math.min(Math.max(next, min), max) : endValue;
       data[i]    = Math.round(cursor);
     }
