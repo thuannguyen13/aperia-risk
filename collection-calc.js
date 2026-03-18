@@ -81,9 +81,11 @@ const CollectionCalc = {
 
   // ─── CONFIG ─────────────────────────────────────────────────
   CONFIG: {
-    emptyFallback : '—',
-    decimalPlaces : 2,
-    locale        : 'en-US',
+    emptyFallback      : '—',
+    decimalPlaces      : 2,
+    locale             : 'en-US',
+    mutationDebounceMs : 50,              // Debounce delay (ms) before re-running after DOM mutations
+    currencySymbols    : '$€£¥₹₩₪฿₫₺₴', // Recognised currency symbol characters
   },
 
   // ─── SEL ────────────────────────────────────────────────────
@@ -97,6 +99,8 @@ const CollectionCalc = {
   STATE: {
     scopesProcessed   : 0,
     errorsEncountered : 0,
+    observers         : [],  // Tracked MutationObservers — call disconnect() to clean up
+    debounceTimer     : null,
   },
 
   // ─── INIT ───────────────────────────────────────────────────
@@ -119,14 +123,29 @@ const CollectionCalc = {
 
   collectionLists.forEach((listElement) => {
     const observer = new MutationObserver(() => {
-      this._processAll();
+      // Debounce rapid successive mutations (e.g. bulk DOM inserts) into a single recalc
+      clearTimeout(this.STATE.debounceTimer);
+      this.STATE.debounceTimer = setTimeout(() => this._processAll(), this.CONFIG.mutationDebounceMs);
     });
 
     observer.observe(listElement, {
       childList: true,  // fires when Finsweet adds or removes row elements
     });
+
+    this.STATE.observers.push(observer);
   });
 },
+
+  /**
+   * Disconnects all MutationObservers and clears the debounce timer.
+   * Call this on SPA page transitions to prevent memory leaks.
+   */
+  disconnect() {
+    this.STATE.observers.forEach((observer) => observer.disconnect());
+    this.STATE.observers = [];
+    clearTimeout(this.STATE.debounceTimer);
+    this.STATE.debounceTimer = null;
+  },
 
   // ─── PROCESS ALL ────────────────────────────────────────────
 
@@ -462,8 +481,7 @@ const CollectionCalc = {
         const rightValue = parseFactor();
 
         if (operator === '/' && rightValue === 0) {
-          console.warn('[CollectionCalc] Division by zero — result is 0.');
-          return 0;
+          throw new Error('Division by zero.');
         }
 
         leftValue = operator === '*' ? leftValue * rightValue : leftValue / rightValue;
@@ -531,15 +549,18 @@ const CollectionCalc = {
    */
   _detectCurrencySymbol(scopeElement) {
     const varElements = scopeElement.querySelectorAll(this.SEL.varCell);
+    // Escape the symbol characters for use inside a character class
+    const escaped = this.CONFIG.currencySymbols.replace(/[-[\]\\^]/g, '\\$&');
+    const pattern = new RegExp(`^([${escaped}])|([${escaped}])$`);
 
     for (const varElement of varElements) {
       // Skip empty-var cells — they are CMS text fields, not numeric values
       const variableName = varElement.dataset.calcVar?.trim();
       if (!variableName) continue;
 
-      const rawText     = varElement.textContent.trim();
-      const symbolMatch = rawText.match(/^([^0-9\s.,]+)|([^0-9\s.,]+)$/);
-      if (symbolMatch) return symbolMatch[0];
+      const rawText = varElement.textContent.trim();
+      const match   = rawText.match(pattern);
+      if (match) return (match[1] || match[2]);
     }
 
     return null;

@@ -39,11 +39,13 @@ const CardCharts = {
     barStackedLabelColor:   'rgba(255,255,255,0.4)',
     barStackedFontSize:     11,
 
-    sankeyNodeWidth:   10,
-    sankeyFontSize:    12,
-    sankeyLabelColor:  'rgba(255,255,255,0.7)',
-    sankeyNodeColor:   '#4a9eff',
-    sankeyLinkOpacity: 0.45,
+    sankeyNodeWidth:      10,
+    sankeyFontSize:       12,
+    sankeyLabelColor:     'rgba(255,255,255,0.7)',
+    sankeyNodeColor:      '#4a9eff',
+    sankeyLinkOpacity:    0.45,
+    sankeyPollIntervalMs:  100, // Polling interval (ms) while waiting for d3-sankey to load
+    sankeyPollMaxAttempts: 20,  // Max poll attempts before giving up (100ms × 20 = 2s timeout)
 
     riskTrendDays:           30,
     riskTrendRandomStep:     120,
@@ -490,7 +492,7 @@ const CardCharts = {
 
     const chartDatasets = config.datasets.map((dataset) => {
       const score   = dataset.score ?? max;
-      const history = this._generateMockData(score, min, max);
+      const history = this._generateMockData(score, min, max, undefined, undefined, undefined, dataset.seed);
       const radii   = history.map((_, i) =>
         i === days - 1 ? C.riskTrendLastPointRadius : C.riskTrendPointRadius
       );
@@ -570,16 +572,19 @@ const CardCharts = {
   _buildSankey(el, config) {
     if (typeof d3 === 'undefined' || !d3.sankey) {
       let pollAttempts = 0;
+      const { sankeyPollIntervalMs: interval, sankeyPollMaxAttempts: maxAttempts } = this.CONFIG;
       const pollInterval = setInterval(() => {
         pollAttempts++;
         if (typeof d3 !== 'undefined' && d3.sankey) {
           clearInterval(pollInterval);
-          this._buildSankey(el, config);
-        } else if (pollAttempts > 20) {
+          // Track the instance that resolves asynchronously
+          const instance = this._buildSankey(el, config);
+          if (instance) this.STATE.instances.push(instance);
+        } else if (pollAttempts > maxAttempts) {
           clearInterval(pollInterval);
-          console.error('[CardCharts] d3-sankey not loaded after 2s.');
+          console.error(`[CardCharts] d3-sankey not loaded after ${interval * maxAttempts}ms.`);
         }
-      }, 100);
+      }, interval);
       return null;
     }
 
@@ -864,7 +869,7 @@ const CardCharts = {
     try {
       return JSON.parse(canvas.dataset.config);
     } catch (err) {
-      console.warn('[CardCharts] Invalid data-config JSON:', err);
+      console.warn(`[CardCharts] Invalid data-config JSON on <${canvas.tagName.toLowerCase()} data-chart="${canvas.dataset.chart}">:`, err.message, canvas);
       return {};
     }
   },
@@ -879,26 +884,45 @@ const CardCharts = {
   _resolveValues(dataset, count) {
     if (dataset.values?.length) return dataset.values;
     if (dataset.mock) {
-      const end  = dataset.score    ?? 50;
-      const min  = dataset.min      ?? 0;
-      const max  = dataset.max      ?? 100;
-      const n    = dataset.count    ?? count ?? this.CONFIG.riskTrendDays;
-      const step = dataset.stepSize ?? this.CONFIG.riskTrendRandomStep;
+      const end  = dataset.score      ?? 50;
+      const min  = dataset.min        ?? 0;
+      const max  = dataset.max        ?? 100;
+      const n    = dataset.count      ?? count ?? this.CONFIG.riskTrendDays;
+      const step = dataset.stepSize   ?? this.CONFIG.riskTrendRandomStep;
       const pull = dataset.anchorPull ?? this.CONFIG.riskTrendAnchorPull;
-      return this._generateMockData(end, min, max, n, step, pull);
+      const seed = dataset.seed;       // Optional numeric seed for deterministic output
+      return this._generateMockData(end, min, max, n, step, pull, seed);
     }
     return [];
   },
 
-  _generateMockData(endValue, min, max, count, stepSize, anchorPull) {
-    const steps  = count    ?? this.CONFIG.riskTrendDays;
-    const step   = stepSize ?? this.CONFIG.riskTrendRandomStep;
+  /**
+   * Returns a deterministic pseudo-random function when a seed is provided,
+   * falling back to Math.random for unseeded (non-deterministic) usage.
+   * Uses a 32-bit LCG (Numerical Recipes coefficients).
+   */
+  _seededRandom(seed) {
+    let s = seed >>> 0;
+    return function () {
+      s = (Math.imul(1664525, s) + 1013904223) >>> 0;
+      return s / 0x100000000;
+    };
+  },
+
+  /**
+   * Generates mock time-series data ending at endValue, clamped to [min, max].
+   * Pass a numeric `seed` for deterministic output (useful for tests / SSR consistency).
+   */
+  _generateMockData(endValue, min, max, count, stepSize, anchorPull, seed) {
+    const steps  = count     ?? this.CONFIG.riskTrendDays;
+    const step   = stepSize  ?? this.CONFIG.riskTrendRandomStep;
     const pull   = anchorPull ?? this.CONFIG.riskTrendAnchorPull;
+    const rand   = seed != null ? this._seededRandom(seed) : Math.random.bind(Math);
     const data   = new Array(steps).fill(endValue);
     let   cursor = endValue;
 
     for (let i = steps - 2; i >= 0; i--) {
-      const next = cursor + (Math.random() - 0.5) * 2 * step + (endValue - cursor) * pull;
+      const next = cursor + (rand() - 0.5) * 2 * step + (endValue - cursor) * pull;
       cursor     = Number.isFinite(next) ? Math.min(Math.max(next, min), max) : endValue;
       data[i]    = Math.round(cursor);
     }
