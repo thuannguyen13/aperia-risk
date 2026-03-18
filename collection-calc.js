@@ -608,8 +608,17 @@ const CollectionCalc = {
   _parseNumber(rawText) {
     if (!rawText || !rawText.trim()) return 0;
 
-    const numericString = rawText.replace(/[^0-9.]/g, '');
-    const parsed        = parseFloat(numericString);
+    // Extract the FIRST number found — guards against elements whose textContent
+    // includes hidden Webflow conditional states that duplicate the visible value
+    // (e.g. textContent "100\n100" from a hidden + visible state pair).
+    // Handles: currency prefixes, comma thousands separators, decimal points.
+    const match = rawText.match(/-?[\d,]+(\.\d*)?/);
+    if (!match) {
+      console.warn(`[CollectionCalc] Could not parse value: "${rawText}" — counted as 0.`);
+      return 0;
+    }
+
+    const parsed = parseFloat(match[0].replace(/,/g, ''));
 
     if (isNaN(parsed)) {
       console.warn(`[CollectionCalc] Could not parse value: "${rawText}" — counted as 0.`);
