@@ -65,7 +65,7 @@ const CardCharts = {
         direction: 'vertical',
         stops: [
           { position: 0,    color: 'rgba(20, 4, 4, 1)'    },
-          { position: 0.3,  color: 'rgba(80, 14, 10, 1)'  },
+          { position: 0.3,  color: 'rgba(238, 91, 66, 1)'  },
           { position: 0.65, color: 'rgba(238, 91, 66, 1)' },
           { position: 0.88, color: 'rgba(238, 91, 66, 1)' },
           { position: 1,    color: 'rgba(238, 91, 66, 1)' },
