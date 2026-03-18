@@ -11,11 +11,15 @@
 //  [data-calc-scope]                        ← calculation boundary (plain, no value needed)
 //  │  [data-calc-var="name"]                ← registers cell value as named variable
 //  │                                           same name on multiple cells = auto summed
+//  │  [data-calc-var="name" data-calc-count]← registers 1 (not text content) — use to
+//  │                                           count rows without a numeric CMS field
 //  │  [data-calc-output="expr"]             ← evaluates expression, writes result
 //  │  [data-calc-output="expr"              ← evaluates, writes, AND exposes result
 //  │   data-calc-var="name"]                   as "name" to outputs below it (chain)
-//  └─ [data-calc-scope data-calc-as="name"] ← inner scope — exposes its first output
-//                                              as "name" into parent scope
+//  ├─ [data-calc-scope data-calc-as="name"] ← inner scope — exposes its first output
+//  │                                           as "name" into parent scope
+//  └─ [data-calc-scope data-calc-as]        ← inner scope — exposes ALL chained vars
+//                                              into parent scope under their own names
 //
 //  Webflow component cell states (value-based, not presence-based):
 //    data-calc-output=""   data-calc-var="MC"       → pure var    — register only
@@ -56,6 +60,25 @@
 //      <div data-calc-output="amount" data-calc-var="row_total"></div>
 //    </div>
 //    <div data-calc-output="row_total" data-calc-var=""></div>  ← grand total
+//  </div>
+//
+// ── Scenario 4 — Count + sum from a multi-reference list ─────
+//
+//  <div data-calc-scope>                              ← List A item
+//    <div data-calc-scope data-calc-as>               ← List B multi-ref (data-calc-as with no value)
+//      <!-- repeated per connected List B item: -->
+//      <div data-calc-var="rows"   data-calc-output="" data-calc-count></div>  ← counts as 1
+//      <div data-calc-var="amount" data-calc-output="">250</div>               ← real value
+//
+//      <!-- chained outputs — ALL promoted to parent scope under their own names -->
+//      <div data-calc-output="rows"            data-calc-var="b_count"></div>
+//      <div data-calc-output="amount"          data-calc-var="b_sum"></div>
+//      <div data-calc-output="amount / rows"   data-calc-var="b_avg"></div>
+//    </div>
+//
+//    <div data-calc-output="b_count" data-calc-var=""></div>  ← number of connected items
+//    <div data-calc-output="b_sum"   data-calc-var=""></div>  ← total value
+//    <div data-calc-output="b_avg"   data-calc-var=""></div>  ← average value
 //  </div>
 //
 // ── Script order in Webflow ──────────────────────────────────
@@ -180,7 +203,8 @@ const CollectionCalc = {
    * 1. Cleans up any injected vars from previous render cycle.
    * 2. Collects static [data-calc-var] cells into a variable map.
    * 3. Walks [data-calc-output] cells in DOM order — evaluate → write → optionally chain.
-   * 4. If scope has data-calc-as, injects first output result into parent scope's map.
+   * 4. If scope has data-calc-as="name" → injects first output into parent as "name".
+   *    If scope has data-calc-as (empty) → injects ALL chained vars into parent by their own names.
    * @param {HTMLElement} scopeElement
    */
   _processScope(scopeElement) {
@@ -197,6 +221,7 @@ const CollectionCalc = {
     }
 
     let firstOutputValue = null;
+    const chainedVars    = {}; // tracks final value of every chained var for multi-export
 
     outputElements.forEach((outputElement) => {
       const expression = outputElement.dataset.calcOutput?.trim();
@@ -243,14 +268,25 @@ const CollectionCalc = {
       // Non-empty data-calc-var on an output = chained — register for outputs below
       const chainedVarName = outputElement.dataset.calcVar?.trim();
       if (chainedVarName) {
-        variableMap[chainedVarName] = (variableMap[chainedVarName] ?? 0) + result;
+        variableMap[chainedVarName]  = (variableMap[chainedVarName] ?? 0) + result;
+        chainedVars[chainedVarName]  = variableMap[chainedVarName];
       }
     });
 
-    // Bubble first output up to parent scope via data-calc-as
-    const bubbleAsName = scopeElement.dataset.calcAs?.trim();
-    if (bubbleAsName && firstOutputValue !== null) {
-      this._injectIntoParentScope(scopeElement, bubbleAsName, firstOutputValue);
+    // Bubble up to parent scope via data-calc-as.
+    // getAttribute distinguishes absent (null) from present-but-empty ('').
+    //   null   → no export
+    //   ''     → multi-export: all chained vars promoted by their own names
+    //   'name' → single export: first output value exposed as "name"
+    const calcAsAttr = scopeElement.getAttribute('data-calc-as');
+    if (calcAsAttr !== null) {
+      if (calcAsAttr.trim() === '') {
+        Object.entries(chainedVars).forEach(([name, value]) => {
+          this._injectIntoParentScope(scopeElement, name, value);
+        });
+      } else if (firstOutputValue !== null) {
+        this._injectIntoParentScope(scopeElement, calcAsAttr.trim(), firstOutputValue);
+      }
     }
 
     this.STATE.scopesProcessed++;
@@ -291,7 +327,10 @@ const CollectionCalc = {
       // Has a real expression — chained output, registered during the output walk instead
       if (hasExpression) return;
 
-      const parsedValue = this._parseNumber(varElement.textContent);
+      // data-calc-count sentinel — contributes 1 per element, ignores text content
+      const parsedValue = varElement.hasAttribute('data-calc-count')
+        ? 1
+        : this._parseNumber(varElement.textContent);
       variableMap[variableName] = (variableMap[variableName] ?? 0) + parsedValue;
     });
 
